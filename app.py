@@ -1,13 +1,11 @@
 from flask import Flask, request, render_template_string, send_file
-import requests
-import csv
-import io
+import requests, csv, io
 from bs4 import BeautifulSoup
 
 app = Flask(__name__)
+app.secret_key = "researchbot_secret"
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
-
 DATA_STORE = []
 
 HTML = """
@@ -20,6 +18,7 @@ HTML = """
         body { font-family: Arial; background: #eef; padding: 20px; }
         .box { background: #fff; padding: 20px; border-radius: 12px; max-width: 720px; margin: auto; }
         input, button { padding: 12px; width: 100%; margin: 6px 0; font-size: 16px; }
+        pre { white-space: pre-wrap; }
     </style>
 </head>
 <body>
@@ -33,48 +32,58 @@ HTML = """
     {% if results %}
         <h3>Resultados + Resumo</h3>
         <pre>{{ results }}</pre>
+        <a href="/export">Exportar CSV</a>
     {% endif %}
-
-    <hr>
-    <a href="/export">Exportar CSV</a>
 </div>
 </body>
 </html>
 """
 
+# ---------- FUNÇÕES ----------
+
 def ai_summary(text):
     parts = text.split(".")
-    return ". ".join(parts[:3])
+    return ". ".join(parts[:3]) + "."
 
 def search_web(query):
-    url = "https://duckduckgo.com/html/?q=" + query
-    r = requests.get(url, headers=HEADERS)
-    soup = BeautifulSoup(r.text, "html.parser")
-    results = []
+    url = "https://api.duckduckgo.com/"
+    params = {
+        "q": query,
+        "format": "json",
+        "no_redirect": 1,
+        "no_html": 1
+    }
 
-    for a in soup.select("a.result__a")[:3]:
-        results.append({
-            "type": "web",
-            "title": a.get_text(),
-            "link": a["href"]
-        })
+    r = requests.get(url, params=params, headers=HEADERS)
+    data = r.json()
+
+    results = []
+    for item in data.get("RelatedTopics", [])[:5]:
+        if isinstance(item, dict) and item.get("Text"):
+            results.append({
+                "type": "web",
+                "title": item["Text"],
+                "link": item.get("FirstURL")
+            })
 
     return results
 
 def search_youtube(query):
-    url = "https://www.youtube.com/results?search_query=" + query.replace(" ", "+")
-    r = requests.get(url, headers=HEADERS)
-    soup = BeautifulSoup(r.text, "html.parser")
-    videos = []
+    feed = f"https://www.youtube.com/feeds/videos.xml?search_query={query}"
+    r = requests.get(feed, headers=HEADERS)
+    soup = BeautifulSoup(r.text, "xml")
 
-    for a in soup.select("a#video-title")[:3]:
+    videos = []
+    for entry in soup.find_all("entry")[:5]:
         videos.append({
             "type": "youtube",
-            "title": a.get("title"),
-            "link": "https://youtube.com" + a.get("href")
+            "title": entry.title.text,
+            "link": entry.link["href"]
         })
 
     return videos
+
+# ---------- ROTAS ----------
 
 @app.route("/")
 def home():
@@ -82,15 +91,19 @@ def home():
 
 @app.route("/search", methods=["POST"])
 def search():
-    query = request.form["query"]
-    results = search_web(query) + search_youtube(query)
+    query = request.form.get("query")
 
-    titles = " ".join([r["title"] for r in results if r.get("title")])
+    web_results = search_web(query)
+    yt_results = search_youtube(query)
+
+    results = web_results + yt_results
+
+    titles = ". ".join([r["title"] for r in results])
     summary = ai_summary(titles)
 
     DATA_STORE.extend(results)
 
-    display = "Resumo IA:\n" + summary + "\n\nDados:\n" + str(results)
+    display = f"Resumo IA:\n{summary}\n\nDados:\n{results}"
     return render_template_string(HTML, results=display)
 
 @app.route("/export")
